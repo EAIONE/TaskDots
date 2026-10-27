@@ -1006,11 +1006,32 @@ enum LaunchLogin {
         if #available(macOS 13.0, *) {
             let s = SMAppService.mainApp
             do {
-                if on { try s.register() } else { try s.unregister() }
+                if on {
+                    // 已注册则不重复调用 register()，避免系统反复弹"后台项目"提醒
+                    if s.status == .enabled { return true }
+                    try s.register()
+                } else {
+                    try s.unregister()
+                }
                 return true
-            } catch { }
+            } catch {
+                // 状态已是启用时视为成功
+                if on && s.status == .enabled { return true }
+            }
         }
         return setLaunchAgent(on)
+    }
+    /// 迁移：清除旧版 LaunchAgent 自启方式，改用系统正规登录项（SMAppService）。
+    /// 旧方式每次开机都会触发"后台项目"系统提醒；正规登录项只在首次添加时提醒一次。
+    static func migrateLegacyAgent(enabled: Bool) {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/com.eai.taskdots.plist")
+        if FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        guard enabled, #available(macOS 13.0, *) else { return }
+        if SMAppService.mainApp.status == .enabled { return }
+        try? SMAppService.mainApp.register()
     }
     private static func setLaunchAgent(_ on: Bool) -> Bool {
         let fm = FileManager.default
@@ -2716,6 +2737,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenus()
         store = Store()
+        LaunchLogin.migrateLegacyAgent(enabled: store.settings.launchAtLogin)
         panel = DockPanel(store: store)
         panel.orderFrontRegardless()
         engine = ReminderEngine(store: store)
