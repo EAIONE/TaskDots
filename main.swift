@@ -192,7 +192,17 @@ final class Store: ObservableObject {
     @Published var draggedTaskID: UUID?
     @Published var focusRequest = 0
     var isReadOnly: Bool { loadFailed }
-    @Published var statusMessage: String?
+    @Published var expandedTaskID: UUID?
+    private var statusDismissWorkItem: DispatchWorkItem?
+    @Published var statusMessage: String? {
+        didSet {
+            statusDismissWorkItem?.cancel()
+            guard statusMessage != nil else { return }
+            let item = DispatchWorkItem { [weak self] in self?.statusMessage = nil }
+            statusDismissWorkItem = item
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: item)
+        }
+    }
     @Published private(set) var saveError: String?
     struct UndoEntry { let task: TaskItem; let index: Int; let title: String }
     @Published private(set) var undoEntries: [UndoEntry] = []
@@ -277,11 +287,10 @@ final class Store: ObservableObject {
     @Published private(set) var onlineQuoteStatus = "每日联网更新 · 断网使用本地语录"
     private var onlineQuotesLoading = false
     private var lastOnlineAttempt = Date.distantPast
-    func fetchOnlineQuotesIfNeeded() {
+    func fetchOnlineQuotesIfNeeded(force: Bool = false) {
         let day = keyFmt.string(from: Date())
         guard !quoteLoadFailed, !onlineQuotesLoading,
-              workQuotes.onlineDay != day,
-              Date().timeIntervalSince(lastOnlineAttempt) > 3600 else { return }
+              force || (workQuotes.onlineDay != day && Date().timeIntervalSince(lastOnlineAttempt) > 3600) else { return }
         onlineQuotesLoading = true
         onlineQuoteStatus = "正在联网筛选语录…"
         lastOnlineAttempt = Date()
@@ -290,10 +299,13 @@ final class Store: ObservableObject {
                 guard let self = self else { return }
                 self.onlineQuotesLoading = false
                 guard !self.quoteLoadFailed else { return }
-                self.onlineQuoteStatus = reachedServer ? "今日联网筛选到\(values.count)条 · 不足由本地补足" : "暂时无法联网 · 正在使用本地语录"
-                if reachedServer {
+                self.onlineQuoteStatus = reachedServer
+                    ? (values.isEmpty ? "接口已连接 · 暂无符合打工主题的新语录，可重试" : "今日联网筛选到\(values.count)条 · 不足由本地补足")
+                    : "暂时无法联网 · 正在使用本地语录"
+                if !values.isEmpty {
                     self.workQuotes.onlineDay = day
                     self.workQuotes.mergeOnline(values)
+                    self.quote = self.workQuotes.next()
                     self.saveQuotes()
                 }
             }
@@ -580,7 +592,9 @@ enum OnlineQuoteService {
         let url = URL(string: "https://xiaoapi.cn/v1/zs_yulu.php?type=%E6%90%9E%E7%AC%91")!
         func request(_ remaining: Int, _ values: [String], _ reached: Bool) {
             guard remaining > 0 else { completion(values, reached); return }
-            var req = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+            components.queryItems = (components.queryItems ?? []) + [URLQueryItem(name: "_", value: UUID().uuidString)]
+            var req = URLRequest(url: components.url!, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
             req.setValue("TaskDots/1.9", forHTTPHeaderField: "User-Agent")
             URLSession.shared.dataTask(with: req) { data, response, error in
                 guard error == nil, let response = response as? HTTPURLResponse,
@@ -1015,7 +1029,6 @@ enum LaunchLogin {
                 }
                 return true
             } catch {
-                // 状态已是启用时视为成功
                 if on && s.status == .enabled { return true }
             }
         }
@@ -1072,6 +1085,37 @@ final class DockPanel: NSPanel {
     var typographyPanel: TypographyPanel?
     var isDockDragging = false
     var isMainDragging = false
+    private var autoDockTimer: Timer?
+    private var lastPointerPresence = Date()
+    private var keyboardMonitor: Any?
+
+    static func shouldAutoDock(now: Date, lastPresence: Date, pointerInside: Bool, interacting: Bool) -> Bool {
+        !pointerInside && !interacting && now.timeIntervalSince(lastPresence) >= 5
+    }
+
+    private func checkAutoDock() {
+        let now = Date()
+        guard isVisible, !store.settings.docked else { lastPointerPresence = now; return }
+        let point = NSEvent.mouseLocation
+        let helperVisible = typographyPanel?.isVisible == true
+        let pointerInside = frame.contains(point)
+        let busy = isMainDragging || isDockDragging || store.draggedTaskID != nil
+            || NSEvent.pressedMouseButtons != 0 || attachedSheet != nil
+            || helperVisible || NSApp.windows.contains { $0 !== self && $0.isVisible && $0.level == .popUpMenu }
+        if pointerInside || busy { lastPointerPresence = now; return }
+        if Self.shouldAutoDock(now: now, lastPresence: lastPointerPresence, pointerInside: pointerInside, interacting: busy),
+           let screen = currentScreen {
+            let vf = screen.visibleFrame
+            // Dock to the nearest edge, keeping the handle beside the current window.
+            store.settings.dockY = max(vf.minY, min(vf.maxY - dockHeight, frame.midY - dockHeight / 2))
+            dock(edge: frame.midX < vf.midX ? 0 : 1)
+        }
+    }
+
+    deinit {
+        autoDockTimer?.invalidate()
+        if let monitor = keyboardMonitor { NSEvent.removeMonitor(monitor) }
+    }
 
     /// 隐蔽的固定高度边缘抓手
     var dockHeight: CGFloat { 104 }
@@ -1097,6 +1141,12 @@ final class DockPanel: NSPanel {
         standardWindowButton(.zoomButton)?.isHidden = true
         contentView = NSHostingView(rootView: RootView(store: store))
         store.panel = self
+        autoDockTimer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.checkAutoDock() }
+        if let timer = autoDockTimer { RunLoop.main.add(timer, forMode: .common) }
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.lastPointerPresence = Date()
+            return event
+        }
         if s.docked { applyDockedFrame(animated: false) }
         else { applyMainFrame(animated: false) }
     }
@@ -1119,6 +1169,7 @@ final class DockPanel: NSPanel {
     }
 
     func finishMainDrag() {
+        lastPointerPresence = Date()
         isMainDragging = false
         guard !store.settings.docked, let screen = currentScreen else { return }
         if let edge = Self.edgeForRelease(frame: frame, visible: screen.visibleFrame) {
@@ -1166,6 +1217,8 @@ final class DockPanel: NSPanel {
 
     /// 磁吸靠边
     func dock(edge: Int) {
+        endEditing(for: nil)
+        makeFirstResponder(nil)
         typographyPanel?.orderOut(nil)
         if !store.settings.docked {
             store.settings.lastX = frame.minX
@@ -1180,6 +1233,7 @@ final class DockPanel: NSPanel {
 
     /// 从侧边栏展开主界面（换一条语录）
     func undock(filter: Priority? = nil) {
+        lastPointerPresence = Date()
         store.nextQuote()
         store.openWithFilter(filter)
         store.settings.docked = false
@@ -1189,6 +1243,7 @@ final class DockPanel: NSPanel {
 
     /// 从停靠态拖拽直接展开整个界面（窗口出现在当前拖拽位置）
     func undockToDragPosition() {
+        lastPointerPresence = Date()
         let origin = frame.origin
         store.nextQuote()
         store.clearFilter()
@@ -1304,11 +1359,16 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            if store.settings.docked {
-                DockedStackView(store: store)
-            } else {
-                MainView(store: store, showCompleted: $showCompleted, showSettings: $showSettings)
-            }
+            // Keep form state alive while the window is temporarily folded.
+            MainView(store: store, showCompleted: $showCompleted, showSettings: $showSettings)
+                .frame(width: DockPanel.mainSize.width, height: DockPanel.mainSize.height)
+                .opacity(store.settings.docked ? 0 : 1)
+                .allowsHitTesting(!store.settings.docked)
+                .accessibilityHidden(store.settings.docked)
+                .frame(width: store.settings.docked ? 0 : DockPanel.mainSize.width,
+                       height: store.settings.docked ? 0 : DockPanel.mainSize.height)
+                .clipped()
+            if store.settings.docked { DockedStackView(store: store) }
         }
         .ignoresSafeArea()
         .background(Color.clear)
@@ -1439,15 +1499,16 @@ struct FilterBar: View {
 // Kept the component name for the single-file build; the choices now occupy one line.
 struct PriorityGrid: View {
     @Binding var selection: Priority
+    var compact = false
     var body: some View {
         HStack(spacing: 4) {
             ForEach(Priority.allCases) { priority in
                 Button { selection = priority } label: {
                     HStack(spacing: 4) {
                         RoundedRectangle(cornerRadius: 1).fill(priority.color).frame(width: 3, height: 11)
-                        Text(priority.shortLabel).font(.system(size: 10, weight: selection == priority ? .semibold : .regular)).lineLimit(1)
+                        Text(priority.shortLabel).font(.system(size: compact ? 9 : 10, weight: selection == priority ? .semibold : .regular)).lineLimit(1)
                     }
-                    .frame(maxWidth: .infinity).frame(height: 27)
+                    .frame(maxWidth: .infinity).frame(height: compact ? 22 : 27)
                     .foregroundColor(selection == priority ? .primary : .secondary)
                     .background(selection == priority ? priority.color.opacity(0.12) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 6))
                     .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(selection == priority ? priority.color.opacity(0.6) : .clear))
@@ -1621,6 +1682,9 @@ struct FavoriteQuotesSheet: View {
 struct DueDatePicker: View {
     let holiday: HolidayService?
     @Binding var date: Date?
+    var compact = false
+    var showQuickChoices = true
+    var showDateControl = true
     @State private var showCal = false
 
     private var todayStart: Date { Calendar.current.startOfDay(for: Date()) }
@@ -1630,6 +1694,7 @@ struct DueDatePicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
+            if showQuickChoices {
             HStack(spacing: 5) {
                 offsetChip("今天", offset: 0)
                 offsetChip("明天", offset: 1)
@@ -1637,23 +1702,26 @@ struct DueDatePicker: View {
                 quickChip("本周", target: lastWorkdayOfWeek())
                 quickChip("下周", target: firstWorkdayOfNextWeek())
             }
-            HStack {
+            }
+            if showDateControl {
+            HStack(spacing: 4) {
                 Button { showCal = true } label: {
                     Label(label, systemImage: "calendar")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: compact ? 10 : 12, weight: .medium)).lineLimit(1)
                 }
                 .buttonStyle(.plain).foregroundColor(.accentColor)
                 .popover(isPresented: $showCal, arrowEdge: .bottom) {
                     CompactCalendar(selected: $date) { showCal = false }
 
                 }
-                Spacer()
+                Spacer(minLength: 0)
                 if date != nil {
                     Button { date = nil } label: { Image(systemName: "xmark.circle.fill") }
                         .buttonStyle(.plain).foregroundColor(.secondary).help("清除截止日期")
                 }
             }
-            .padding(.vertical, 3)
+            .padding(.vertical, compact ? 0 : 3)
+            }
         }
     }
 
@@ -1706,9 +1774,9 @@ struct DueDatePicker: View {
             date = target
         } label: {
             Text(title)
-                .font(.system(size: 11))
+                .font(.system(size: compact ? 10 : 11))
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 6)
+                .padding(.vertical, compact ? 3 : 6)
                 .background(active ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.06))
                 .cornerRadius(7)
         }
@@ -1798,6 +1866,7 @@ struct MainView: View {
                 Button("不喜欢，删除", role: .destructive) { store.dislikeQuote() }.disabled(store.quoteLibraryReadOnly)
                 Divider()
                 Text(store.onlineQuoteStatus)
+                Button("重新联网筛选") { store.fetchOnlineQuotesIfNeeded(force: true) }
                 Button("换一句") { store.nextQuote() }
                 Button("喜欢的语录（\(store.workQuotes.favorites.count)）") { showFavorites = true }
             } label: {
@@ -1852,7 +1921,7 @@ struct TaskFramePreference: PreferenceKey {
 struct TaskRow: View {
     @ObservedObject var store: Store
     let task: TaskItem
-    @State private var expanded = false
+    private var expanded: Bool { store.expandedTaskID == task.id }
     @State private var draftName = ""
     @State private var draftNotes = ""
     @State private var completeHovered = false
@@ -1879,19 +1948,33 @@ struct TaskRow: View {
                 .onHover { completeHovered = $0 }
                 .buttonStyle(.plain).help("标记完成").accessibilityLabel("完成任务：" + task.name)
                 VStack(alignment: .leading, spacing: 3) {
-                    Button {
-                        store.collapseComposerRequest += 1
-                        draftName = task.name
-                        draftNotes = task.notes ?? ""
-                        withAnimation(.easeInOut(duration: 0.16)) { expanded.toggle() }
-                    } label: {
-                        HStack(alignment: .top) {
-                            Text(task.name).font(.system(size: 13, weight: .medium)).lineLimit(3)
-                                .frame(maxWidth: .infinity, alignment: .leading).multilineTextAlignment(.leading)
+                    HStack(alignment: .top) {
+                        if expanded {
+                            TextField("任务名称", text: $draftName)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.accentColor)
+                                .onTapGesture { }
+                                .onSubmit(saveName)
+                                .onChange(of: draftName) { value in
+                                    if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                        _ = store.renameTask(id: task.id, name: value)
+                                        nameError = false
+                                    }
+                                }
+                        } else {
+                            Button(action: toggleEditor) {
+                                Text(task.name).font(.system(size: 13, weight: .medium)).lineLimit(3)
+                                    .frame(maxWidth: .infinity, alignment: .leading).multilineTextAlignment(.leading)
+                                    .contentShape(Rectangle())
+                            }.buttonStyle(.plain).accessibilityLabel("编辑任务：" + task.name)
+                        }
+                        Button(action: toggleEditor) {
                             Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary).padding(.top, 4)
-                        }.contentShape(Rectangle())
-                    }.buttonStyle(.plain).accessibilityLabel("编辑任务：" + task.name)
+                                .font(.system(size: 9, weight: .semibold)).foregroundColor(expanded ? .accentColor : .secondary)
+                                .frame(width: 18, height: 18).contentShape(Rectangle())
+                        }.buttonStyle(.plain).accessibilityLabel(expanded ? "收起任务" : "展开任务")
+                    }
                     HStack(spacing: 6) {
                         Button { store.incrementRevision(id: task.id) } label: {
                             HStack(spacing: 5) {
@@ -1919,6 +2002,9 @@ struct TaskRow: View {
                         }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture(perform: toggleEditor)
                 Image(systemName: "line.3.horizontal")
                     .font(.system(size: 11)).foregroundColor(.secondary.opacity(0.6))
                     .frame(width: 16, height: 30).contentShape(Rectangle())
@@ -1952,26 +2038,27 @@ struct TaskRow: View {
 
             if expanded {
                 Divider().padding(.horizontal, 12)
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        TextField("任务名称", text: $draftName).textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12)).onSubmit(saveName)
-                        Button("保存名称", action: saveName).font(.system(size: 11)).disabled(draftName == task.name)
-                    }
+                VStack(alignment: .leading, spacing: 8) {
                     if nameError { Text("任务名称不能为空").font(.system(size: 11)).foregroundColor(.red) }
-                    PriorityGrid(selection: Binding(get: { task.priority }, set: { value in
-                        store.editTask(id: task.id) { $0.priority = value }
-                    }))
                     TaskNotesEditor(text: $draftNotes)
                         .onChange(of: draftNotes) { store.updateNotes(id: task.id, notes: $0) }
+                    PriorityGrid(selection: Binding(get: { task.priority }, set: { value in
+                        store.editTask(id: task.id) { $0.priority = value }
+                    }), compact: true)
                     DueDatePicker(holiday: store.holiday, date: Binding(get: { task.dueDate }, set: { value in
                         store.editTask(id: task.id, resetReminder: true) {
                             $0.dueDate = value
                             if value == nil { $0.remindOffsetDays = nil }
                         }
-                    }))
-                    HStack {
-                        Label("提醒", systemImage: "bell").font(.system(size: 11)).foregroundColor(.secondary)
+                    }), compact: true, showDateControl: false)
+                    HStack(spacing: 7) {
+                        DueDatePicker(holiday: store.holiday, date: Binding(get: { task.dueDate }, set: { value in
+                            store.editTask(id: task.id, resetReminder: true) {
+                                $0.dueDate = value
+                                if value == nil { $0.remindOffsetDays = nil }
+                            }
+                        }), compact: true, showQuickChoices: false)
+                        Image(systemName: "bell").font(.system(size: 10)).foregroundColor(.secondary).help("提醒")
                         Picker("提醒方式", selection: Binding(get: { task.remindOffsetDays ?? -1 }, set: { value in
                             store.editTask(id: task.id, resetReminder: true) { $0.remindOffsetDays = value >= 0 ? value : nil }
                         })) {
@@ -1979,13 +2066,12 @@ struct TaskRow: View {
                             Text("当天").tag(0)
                             Text("提前1天").tag(1)
                             Text("提前2天").tag(2)
-                        }.labelsHidden().frame(width: 142).disabled(task.dueDate == nil)
-                        Spacer()
+                        }.labelsHidden().controlSize(.small).font(.system(size: 10)).frame(width: 96).disabled(task.dueDate == nil)
                         Button(role: .destructive) { store.delete(task) } label: {
-                            Image(systemName: "trash").frame(width: 26, height: 26)
+                            Image(systemName: "trash").font(.system(size: 11)).frame(width: 20, height: 22)
                         }.buttonStyle(.plain).foregroundColor(.red).help("删除任务（可撤销）").accessibilityLabel("删除任务")
                     }
-                }.padding(12)
+                }.padding(.horizontal, 14).padding(.vertical, 9)
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
@@ -2007,6 +2093,15 @@ struct TaskRow: View {
             Button("标记完成") { store.complete(task) }
         }
 
+    }
+
+    private func toggleEditor() {
+        store.collapseComposerRequest += 1
+        if expanded { saveName() }
+        else { draftName = task.name; draftNotes = task.notes ?? ""; nameError = false }
+        withAnimation(.easeInOut(duration: 0.16)) {
+            store.expandedTaskID = expanded ? nil : task.id
+        }
     }
 
     private func saveName() {
@@ -2035,6 +2130,9 @@ struct AddSection: View {
                 TextField("接下来要做什么？", text: $name)
                     .textFieldStyle(.plain).font(.system(size: 13)).focused($nameFocused)
                     .onSubmit(add).accessibilityLabel("新任务名称")
+                    .onChange(of: store.settings.docked) { docked in
+                        if docked { nameFocused = false }
+                    }
                 Button(action: add) {
                     Image(systemName: "plus").font(.system(size: 13, weight: .semibold)).frame(width: 29, height: 29)
                         .foregroundColor(.white).background(Color.accentColor, in: RoundedRectangle(cornerRadius: 8))
