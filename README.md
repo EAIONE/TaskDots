@@ -79,3 +79,6 @@ swiftc main.swift -o TaskDots
 | `main.swift` | 全部源代码（单文件 SwiftUI 应用） |
 | `AppIcon.icns` / `TaskDots.iconset/` | 应用图标 |
 | `本次更新说明.txt` | 最近一次更新记录 |
+
+## 2.1.2 · 2026-11-02
+添加任务成功后自动收起填写区域，清空名称、备注、截止日期和提醒草稿并结束输入焦点；添加失败时保留草稿。已实际验证回车和加号两条路径。

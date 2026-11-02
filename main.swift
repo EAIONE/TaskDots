@@ -2120,6 +2120,7 @@ struct AddSection: View {
     @State private var due: Date?
     @State private var showDetails = false
     @State private var editorOpen = false
+    @State private var composerRevision = 0
     @State private var offset = -1
     @State private var errMsg: String?
     @FocusState private var nameFocused: Bool
@@ -2130,6 +2131,7 @@ struct AddSection: View {
                 TextField("接下来要做什么？", text: $name)
                     .textFieldStyle(.plain).font(.system(size: 13)).focused($nameFocused)
                     .onSubmit(add).accessibilityLabel("新任务名称")
+                    .id(composerRevision)
                     .onChange(of: store.settings.docked) { docked in
                         if docked { nameFocused = false }
                     }
@@ -2203,12 +2205,9 @@ struct AddSection: View {
         errMsg = nil
         let ok = store.addTask(name: name, priority: priority, due: due, offset: offset, notes: notes)
         if ok {
-            name = ""
-            notes = ""
-            due = nil
-            offset = -1
-            showDetails = false
-            nameFocused = true
+            // End the field-editing session before clearing its bound draft.
+            cancelDraft()
+            composerRevision += 1
             if store.hasFilter { store.clearFilter() }
             store.statusMessage = "已添加任务"
         } else {
