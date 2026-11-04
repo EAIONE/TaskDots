@@ -71,22 +71,18 @@ struct AppSettings: Codable {
     var docked: Bool = false
     var edge: Int = 1                 // 0=左边缘 1=右边缘
     var dockY: CGFloat = 420
-    var lastX: CGFloat = 700
-    var lastY: CGFloat = 420
     var launchAtLogin: Bool = false
     var sortMode: String = "manual"
     var reminderHour: Int = 10
     var collapsed: Bool = false       // 兼容旧数据，已不再使用
 
-    enum CodingKeys: String, CodingKey { case docked, edge, dockY, lastX, lastY, launchAtLogin, collapsed, sortMode, reminderHour }
+    enum CodingKeys: String, CodingKey { case docked, edge, dockY, launchAtLogin, collapsed, sortMode, reminderHour }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         docked = try c.decodeIfPresent(Bool.self, forKey: .docked) ?? false
         edge = try c.decodeIfPresent(Int.self, forKey: .edge) ?? 1
         dockY = try c.decodeIfPresent(CGFloat.self, forKey: .dockY) ?? 420
-        lastX = try c.decodeIfPresent(CGFloat.self, forKey: .lastX) ?? 700
-        lastY = try c.decodeIfPresent(CGFloat.self, forKey: .lastY) ?? 420
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
         sortMode = try c.decodeIfPresent(String.self, forKey: .sortMode) ?? "manual"
         reminderHour = min(16, max(10, try c.decodeIfPresent(Int.self, forKey: .reminderHour) ?? 10))
@@ -1164,8 +1160,8 @@ final class DockPanel: NSPanel {
     init(store: Store) {
         self.store = store
         let s = store.settings
-        let initial = NSRect(x: s.lastX, y: s.lastY,
-                             width: Self.mainSize.width, height: Self.mainSize.height)
+        let initial = NSScreen.main.map { Self.mainFrame(edge: s.edge, visible: $0.visibleFrame) }
+            ?? NSRect(origin: .zero, size: Self.mainSize)
         super.init(contentRect: initial,
                    styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
@@ -1225,11 +1221,6 @@ final class DockPanel: NSPanel {
         guard !store.settings.docked, let screen = currentScreen else { return }
         if let edge = Self.edgeForRelease(frame: frame, visible: screen.visibleFrame) {
             dock(edge: edge)
-        } else {
-            var saved = store.settings
-            saved.lastX = frame.minX
-            saved.lastY = frame.minY
-            store.settings = saved
         }
     }
 
@@ -1271,10 +1262,6 @@ final class DockPanel: NSPanel {
         endEditing(for: nil)
         makeFirstResponder(nil)
         typographyPanel?.orderOut(nil)
-        if !store.settings.docked {
-            store.settings.lastX = frame.minX
-            store.settings.lastY = frame.minY
-        }
         store.settings.edge = edge
         store.settings.docked = true
         hasShadow = false
@@ -1306,23 +1293,18 @@ final class DockPanel: NSPanel {
         var y = origin.y + dockHeight / 2 - 60
         x = max(vf.minX, min(vf.maxX - Self.mainSize.width - 8, x))
         y = max(vf.minY, min(vf.maxY - Self.mainSize.height, y))
-        store.settings.lastX = x
-        store.settings.lastY = y
         setFrame(NSRect(x: x, y: y, width: Self.mainSize.width, height: Self.mainSize.height), display: true)
+    }
+
+    private static func mainFrame(edge: Int, visible: NSRect) -> NSRect {
+        let x = edge == 0 ? visible.minX : max(visible.minX, visible.maxX - mainSize.width)
+        let y = max(visible.minY, visible.midY - mainSize.height / 2)
+        return NSRect(origin: NSPoint(x: x, y: y), size: mainSize)
     }
 
     func applyMainFrame(animated: Bool) {
         guard let scr = currentScreen else { return }
-        let vf = scr.visibleFrame
-        var x = frame.minX
-        if x < vf.minX || x > vf.maxX - Self.mainSize.width {
-            x = store.settings.lastX
-        }
-        if x < vf.minX || x > vf.maxX - Self.mainSize.width {
-            x = vf.maxX - Self.mainSize.width - 40
-        }
-        let y = max(vf.minY, min(vf.maxY - Self.mainSize.height, frame.minY))
-        let target = NSRect(x: x, y: y, width: Self.mainSize.width, height: Self.mainSize.height)
+        let target = Self.mainFrame(edge: store.settings.edge, visible: scr.visibleFrame)
         if animated {
             animator().setFrame(target, display: true, animate: true)
         } else {
@@ -2661,10 +2643,6 @@ extension DockPanel {
         if frame.minX - width - 12 < visible.minX + 8 {
             let x = min(visible.maxX - frame.width - 8, visible.minX + width + 20)
             setFrameOrigin(NSPoint(x: x, y: frame.minY))
-            var saved = store.settings
-            saved.lastX = frame.minX
-            saved.lastY = frame.minY
-            store.settings = saved
         }
         let x = max(visible.minX + 8, frame.minX - width - 12)
         let y = max(visible.minY + 8, min(visible.maxY - height - 8, frame.maxY - height))
