@@ -1834,7 +1834,7 @@ struct MainView: View {
             AddSection(store: store)
                 .disabled(store.isReadOnly)
                 .padding(.horizontal, 12).padding(.bottom, 12)
-            HStack(spacing: 7) {
+            HStack(spacing: 10) {
                 Text(store.hasFilter ? "筛选结果 · \(store.activeTasks.count)" : "待办 · \(store.activeCount)")
                     .font(.system(size: 11, weight: .semibold)).foregroundColor(.secondary)
                     .fixedSize()
@@ -1850,7 +1850,7 @@ struct MainView: View {
                             .font(.system(size: 10))
                     }.menuStyle(.borderlessButton).fixedSize()
                 }
-            }.padding(.horizontal, 16).padding(.bottom, 8)
+            }.padding(.horizontal, 12).padding(.bottom, 10)
             taskList
             FeedbackBar(store: store)
             HStack(spacing: 5) {
@@ -1913,7 +1913,7 @@ struct MainView: View {
             .help("点击喜欢或不喜欢这句打工语录")
 
         }
-        .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 1)
+        .padding(.horizontal, 16).padding(.top, 10).padding(.bottom, 8)
     }
 
     private var taskList: some View {
