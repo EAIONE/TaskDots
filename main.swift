@@ -1417,7 +1417,7 @@ struct RootView: View {
         }
         .ignoresSafeArea()
         .background(Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: store.settings.docked ? 12 : 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: store.settings.docked ? 0 : 18, style: .continuous))
         .tint(Color(red: 0.25, green: 0.36, blue: 0.88))
         .environment(\.locale, Locale(identifier: "zh_CN"))
         .sheet(isPresented: $showCompleted) { CompletedSheet(store: store) }
@@ -1427,12 +1427,36 @@ struct RootView: View {
 
 // MARK: - Docked Stack（按类型分色的数字条，整块可点，高度自适应）
 
+private struct DockedSidebarShape: Shape {
+    let dockedOnLeft: Bool
+
+    func path(in rect: CGRect) -> Path {
+        let radius = min(8, min(rect.width, rect.height) / 2)
+        let x = rect.maxX
+        let top = rect.minY
+        let bottom = rect.maxY
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: top))
+        path.addLine(to: CGPoint(x: x - radius, y: top))
+        path.addArc(center: CGPoint(x: x - radius, y: top + radius),
+                    radius: radius, startAngle: .degrees(-90), endAngle: .degrees(0), clockwise: false)
+        path.addLine(to: CGPoint(x: x, y: bottom - radius))
+        path.addArc(center: CGPoint(x: x - radius, y: bottom - radius),
+                    radius: radius, startAngle: .degrees(0), endAngle: .degrees(90), clockwise: false)
+        path.addLine(to: CGPoint(x: rect.minX, y: bottom))
+        path.closeSubpath()
+        if dockedOnLeft { return path }
+        return path.applying(CGAffineTransform(a: -1, b: 0, c: 0, d: 1, tx: rect.minX + rect.maxX, ty: 0))
+    }
+}
+
 struct DockedStackView: View {
     @ObservedObject var store: Store
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { _ in
             let now = Date()
+            let shape = DockedSidebarShape(dockedOnLeft: store.settings.edge == 0)
             let active = store.allActive
             let submitted = active.filter { $0.isRecentlySubmitted(at: now) }.count
             let pending = active.filter { !$0.isRecentlySubmitted(at: now) }
@@ -1445,8 +1469,8 @@ struct DockedStackView: View {
             }
             .padding(.horizontal, 2)
             .frame(width: DockPanel.dockWidth, height: DockPanel.dockHeight)
-            .background(Color(nsColor: .windowBackgroundColor).opacity(store.settings.dockOpacity), in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
+            .background(Color(nsColor: .windowBackgroundColor).opacity(store.settings.dockOpacity), in: shape)
+            .overlay(shape.stroke(Color.primary.opacity(0.12), lineWidth: 1).clipShape(shape))
             .contentShape(Rectangle())
             .help("蓝色为已提交 · 双击展开任务 · 拖离边缘展开")
             .accessibilityLabel("侧边任务数量，已提交 \(submitted) 项，双击展开")
@@ -1456,7 +1480,9 @@ struct DockedStackView: View {
 
     private func countPill(color: Color, count: Int) -> some View {
         HStack(spacing: 2) {
-            Circle().fill(color).frame(width: 8, height: 8)
+            Circle().fill(color)
+                .overlay(Circle().strokeBorder(Color.black.opacity(0.28), lineWidth: 0.5))
+                .frame(width: 8, height: 8)
             Text("\(count)")
                 .font(.system(size: 10, weight: .semibold, design: .rounded)).monospacedDigit()
                 .foregroundColor(count == 0 ? .secondary : .primary)
