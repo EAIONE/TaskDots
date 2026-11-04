@@ -1122,7 +1122,7 @@ final class DockPanel: NSPanel {
         if let otherAppSince = otherAppSince {
             return now.timeIntervalSince(otherAppSince) >= 3
         }
-        return now.timeIntervalSince(lastActivity) >= 5
+        return now.timeIntervalSince(lastActivity) >= 3
     }
 
     private func checkAutoDock() {
@@ -1939,6 +1939,9 @@ struct MainView: View {
             }.padding(.horizontal, 12).padding(.bottom, 8)
         }
         .coordinateSpace(name: "taskList")
+        .onHover { inside in
+            if inside { store.collapseComposerRequest += 1 }
+        }
         .simultaneousGesture(TapGesture().onEnded { store.collapseComposerRequest += 1 })
         .onPreferenceChange(TaskFramePreference.self) { store.taskFrames = $0 }
     }
@@ -1955,6 +1958,7 @@ struct TaskFramePreference: PreferenceKey {
 
 struct TaskRow: View {
     @ObservedObject var store: Store
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let task: TaskItem
     private var expanded: Bool { store.expandedTaskID == task.id }
     @State private var draftName = ""
@@ -2134,7 +2138,7 @@ struct TaskRow: View {
         store.collapseComposerRequest += 1
         if expanded { saveName() }
         else { draftName = task.name; draftNotes = task.notes ?? ""; nameError = false }
-        withAnimation(.easeInOut(duration: 0.16)) {
+        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.16)) {
             store.expandedTaskID = expanded ? nil : task.id
         }
     }
@@ -2149,6 +2153,7 @@ struct TaskRow: View {
 
 struct AddSection: View {
     @ObservedObject var store: Store
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var name = ""
     @State private var notes = ""
     @State private var priority: Priority = .importantNotUrgent
@@ -2168,7 +2173,7 @@ struct AddSection: View {
                     .onSubmit(add).accessibilityLabel("新任务名称")
                     .id(composerRevision)
                     .onChange(of: store.settings.docked) { docked in
-                        if docked { nameFocused = false }
+                        if docked { collapseEditor() }
                     }
                 Button(action: add) {
                     Image(systemName: "plus").font(.system(size: 13, weight: .semibold)).frame(width: 29, height: 29)
@@ -2180,7 +2185,7 @@ struct AddSection: View {
                 Text("新建任务").font(.system(size: 10)).foregroundColor(.secondary)
                 Spacer()
                 Button("取消") { cancelDraft() }.font(.system(size: 11)).buttonStyle(.plain).foregroundColor(.secondary)
-                Button { editorOpen = false; showDetails = false; nameFocused = false } label: {
+                Button(action: collapseEditor) {
                     Image(systemName: "chevron.up").frame(width: 24, height: 20)
                 }.buttonStyle(.plain).help("收起填写区域")
             }
@@ -2188,7 +2193,7 @@ struct AddSection: View {
             TaskNotesEditor(text: $notes)
             HStack {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.15)) { showDetails.toggle() }
+                    withAnimation(editorAnimation) { showDetails.toggle() }
                 } label: {
                     Label(due.map { dueBadgeText($0) + "截止" } ?? "添加截止日期", systemImage: "calendar.badge.plus")
                         .font(.system(size: 11))
@@ -2220,19 +2225,32 @@ struct AddSection: View {
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.accentColor.opacity(0.12)))
-        .onChange(of: nameFocused) { focused in if focused { editorOpen = true } }
-        .onChange(of: store.collapseComposerRequest) { _ in
-            guard name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            editorOpen = false; showDetails = false; errMsg = nil; nameFocused = false
+        .onChange(of: nameFocused) { focused in
+            if focused { withAnimation(editorAnimation) { editorOpen = true } }
         }
+        .onChange(of: store.collapseComposerRequest) { _ in collapseEditor() }
         .onExitCommand { cancelDraft() }
         .onChange(of: store.focusRequest) { _ in editorOpen = true; nameFocused = true }
         .onAppear { if store.focusRequest > 0 { nameFocused = true } }
     }
 
+    private var editorAnimation: Animation? {
+        reduceMotion ? nil : .easeInOut(duration: 0.16)
+    }
+
+    private func collapseEditor() {
+        guard editorOpen || nameFocused else { return }
+        nameFocused = false
+        withAnimation(store.settings.docked ? nil : editorAnimation) {
+            editorOpen = false
+            showDetails = false
+            errMsg = nil
+        }
+    }
+
     private func cancelDraft() {
         name = ""; notes = ""; due = nil; offset = -1; errMsg = nil
-        showDetails = false; editorOpen = false; nameFocused = false
+        collapseEditor()
     }
 
     private func add() {
