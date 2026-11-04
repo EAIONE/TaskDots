@@ -2164,7 +2164,7 @@ struct TaskRow: View {
                     }
                 }
         }
-        .overlay(alignment: .leading) { task.priority.color.frame(width: 4) }
+        .overlay(alignment: .leading) { task.priority.color.frame(width: 8) }
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 6, style: .continuous)
