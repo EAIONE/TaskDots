@@ -2134,7 +2134,7 @@ struct TaskRow: View {
             Color(nsColor: .controlBackgroundColor)
                 .overlay {
                     if recentlySubmitted {
-                        Color.accentColor.opacity(0.17)
+                        Color.primary.opacity(0.055)
                     }
                 }
         }
