@@ -9,12 +9,12 @@ import ServiceManagement
 enum Priority: Int, Codable, CaseIterable, Identifiable {
     case urgentImportant, importantNotUrgent, urgentNotImportant, notUrgentNotImportant
     var id: Int { rawValue }
-    var shortLabel: String { ["紧急重要", "重要不急", "紧急不重", "不急不重"][rawValue] }
+    var shortLabel: String { ["重要紧急", "重要不急", "不重紧急", "不重不急"][rawValue] }
     var label: String {
         switch self {
-        case .urgentImportant: return "紧急重要"
+        case .urgentImportant: return "重要紧急"
         case .importantNotUrgent: return "重要不紧急"
-        case .urgentNotImportant: return "紧急不重要"
+        case .urgentNotImportant: return "不重要但紧急"
         case .notUrgentNotImportant: return "不重要不紧急"
         }
     }
@@ -252,7 +252,6 @@ final class Store: ObservableObject {
         readyToSave = true
         loadPoolCache()
         nextQuote()
-        fetchOnlineQuotesIfNeeded()
     }
 
     private func persistIfReady() {
@@ -279,37 +278,8 @@ final class Store: ObservableObject {
     }
 
     func refreshQuotesIfNeeded() {
-        fetchOnlineQuotesIfNeeded()
         guard workQuotes.day != keyFmt.string(from: Date()) else { return }
         nextQuote()
-    }
-
-    @Published private(set) var onlineQuoteStatus = "每日联网更新 · 断网使用本地语录"
-    private var onlineQuotesLoading = false
-    private var lastOnlineAttempt = Date.distantPast
-    func fetchOnlineQuotesIfNeeded(force: Bool = false) {
-        let day = keyFmt.string(from: Date())
-        guard !quoteLoadFailed, !onlineQuotesLoading,
-              force || (workQuotes.onlineDay != day && Date().timeIntervalSince(lastOnlineAttempt) > 3600) else { return }
-        onlineQuotesLoading = true
-        onlineQuoteStatus = "正在联网筛选语录…"
-        lastOnlineAttempt = Date()
-        OnlineQuoteService.fetch { [weak self] values, reachedServer in
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.onlineQuotesLoading = false
-                guard !self.quoteLoadFailed else { return }
-                self.onlineQuoteStatus = reachedServer
-                    ? (values.isEmpty ? "接口已连接 · 暂无符合打工主题的新语录，可重试" : "今日联网筛选到\(values.count)条 · 不足由本地补足")
-                    : "暂时无法联网 · 正在使用本地语录"
-                if !values.isEmpty {
-                    self.workQuotes.onlineDay = day
-                    self.workQuotes.mergeOnline(values)
-                    self.quote = self.workQuotes.next()
-                    self.saveQuotes()
-                }
-            }
-        }
     }
 
     func likeQuote() {
@@ -522,7 +492,6 @@ final class Store: ObservableObject {
 // MARK: - Work quotes: daily local refresh, favorites and permanent exclusions.
 
 struct WorkQuoteLibrary: Codable {
-    var onlineDay: String? = nil
     var day = ""
     var quotes: [String] = []
     var favorites: [String] = []
@@ -540,15 +509,6 @@ struct WorkQuoteLibrary: Codable {
         quotes = Array(quotes.suffix(100))
         cursor = max(0, quotes.count - batch.count)
         day = key
-    }
-
-    mutating func mergeOnline(_ values: [String]) {
-        let fresh = Array(Set(values)).filter { !rejected.contains($0) && !quotes.contains($0) }
-        guard !fresh.isEmpty else { return }
-        quotes.removeLast(min(fresh.count, quotes.count))
-        quotes.append(contentsOf: fresh)
-        quotes = Array(quotes.suffix(100))
-        cursor = max(0, quotes.count - fresh.count)
     }
 
     mutating func next() -> String {
@@ -569,44 +529,6 @@ struct WorkQuoteLibrary: Codable {
         favorites.removeAll { $0 == value }
         rejected.insert(value)
         if quotes.isEmpty { cursor = 0 } else { cursor %= quotes.count }
-    }
-}
-
-enum OnlineQuoteService {
-    // Public humor feed. Only short work-related text is eligible for this app.
-    static func parse(_ data: Data) -> String? {
-        guard data.count < 16384,
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              object["code"] as? Int == 200,
-              let raw = object["text"] as? String else { return nil }
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        let topics = ["上班", "下班", "打工", "老板", "同事", "甲方", "改稿", "加班", "工资", "工位", "开会", "会议", "需求", "设计师", "摸鱼", "周一", "周五", "绩效", "打卡"]
-        let excluded = ["http", "www.", "微信", "加群", "上我", "做爱", "傻逼", "色情", "自杀", "去死"]
-        guard (6...80).contains(text.count), topics.contains(where: text.contains),
-              !excluded.contains(where: text.lowercased().contains),
-              !text.contains("<"), !text.contains(">") else { return nil }
-        return text
-    }
-
-    static func fetch(completion: @escaping ([String], Bool) -> Void) {
-        let url = URL(string: "https://xiaoapi.cn/v1/zs_yulu.php?type=%E6%90%9E%E7%AC%91")!
-        func request(_ remaining: Int, _ values: [String], _ reached: Bool) {
-            guard remaining > 0 else { completion(values, reached); return }
-            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
-            components.queryItems = (components.queryItems ?? []) + [URLQueryItem(name: "_", value: UUID().uuidString)]
-            var req = URLRequest(url: components.url!, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
-            req.setValue("TaskDots/1.9", forHTTPHeaderField: "User-Agent")
-            URLSession.shared.dataTask(with: req) { data, response, error in
-                guard error == nil, let response = response as? HTTPURLResponse,
-                      response.statusCode == 200, let data = data else {
-                    completion(values, reached); return
-                }
-                var next = values
-                if let value = parse(data), !next.contains(value) { next.append(value) }
-                request(remaining - 1, next, true)
-            }.resume()
-        }
-        request(30, [], false)
     }
 }
 
@@ -818,7 +740,106 @@ enum QuoteService {
         "同事说我状态不错，可能是显示器反光。",
         "这不是黑眼圈，是职场限定烟熏妆。",
         "我的礼貌由工资赞助，余额不足时请谅解。",
-        "今天也有在发光，主要是屏幕照的。"
+        "今天也有在发光，主要是屏幕照的。",
+        "交稿前改了七版，定稿以后才有人问第一版在哪里。",
+        "客户说想要一点留白，我看了眼自己的周末。",
+        "封面已经很有层次了，主要是改稿记录叠了八层。",
+        "目录最守规矩，说跳到哪一页就跳到哪一页。",
+        "字号能改小，需求能不能也缩一点？",
+        "排版最难对齐的不是网格，是每个人对齐的标准。",
+        "印厂问我哪份是终稿，我把问题转给了文件名。",
+        "修图修到最后，最想调亮的是下班时间。",
+        "出血设好了，剩下的是工期在出血。",
+        "我的桌面有两个文件夹，一个叫今天交，一个叫昨天就该交。",
+        "设计稿的留白里，藏着我没来得及喝的咖啡。",
+        "这页加了页码，终于有东西愿意按顺序来。",
+        "字距越调越细，离下班的距离却越拉越远。",
+        "对方说只换个图，发来了整套新素材。",
+        "意见集中反馈，是指集中在我刚关电脑的时候反馈。",
+        "说好只看第一轮，结果第一轮里有八个小轮。",
+        "改动都很小，小到每个人都能补一个。",
+        "反馈写着整体不错，我往下滚了三屏才看到句号。",
+        "定稿群里最活跃的，是那个从来没说过定稿的人。",
+        "一份稿子四个方向，只有截止日期始终坚定。",
+        "我以为这是最终确认，原来是下一轮的开场白。",
+        "对方发了个笑脸，我先把文件另存了一份。",
+        "客户说有个想法，我的鼠标自己移到了撤销键上。",
+        "我把意见逐条打勾，群里开始逐条追加。",
+        "一句“按之前的”，让我翻出了三个互不相同的之前。",
+        "会议的议程很短，走出会议室的路特别长。",
+        "会上最容易达成一致的事，是再约一次会。",
+        "开会时大家都说简单，散会后简单归我负责。",
+        "我准备了三页汇报，第一页就聊到了午饭。",
+        "会议记录写了待确认，待确认又催我先执行。",
+        "汇报里的进度条比我乐观，它已经走到八成了。",
+        "日历给我留了十五分钟空闲，转眼就被会议邀请领走了。",
+        "这个会的唯一产出，是下一次会议的时间。",
+        "议程上有五分钟讨论，大家讨论了五分钟该怎么讨论。",
+        "我取消了一个会，日历马上给我补了两个。",
+        "上午做计划，下午做计划变更，晚上终于轮到做事。",
+        "事项有明确的负责人，只有决策还在四处流浪。",
+        "截止日期走直线，项目进度绕环岛。",
+        "事情刚排好优先级，临时需求就自己插到了最前面。",
+        "这个任务的前置条件，是另一个也在等待前置条件的任务。",
+        "待办列表看起来很短，因为我还没展开子任务。",
+        "我把工作分成三类：今天做、马上做、怎么还没做。",
+        "进度更新发了以后，我终于有时间更新进度。",
+        "今天没有拖延，只是被好几个着急的任务轮流拖住。",
+        "项目里最稳定的，是每周都要调整一次计划。",
+        "任务一到截止日，突然就找到了所有相关人员。",
+        "开工前把准备工作列齐，发现准备工作自己就是个项目。",
+        "延期申请的截止时间，比项目截止时间还早。",
+        "工作群最安静的时候，通常是我问谁来确认的时候。",
+        "消息已读是对话状态，群里没人说话是项目状态。",
+        "工作群的“收到”和事情的“做完”隔着一整天。",
+        "对方打字显示了半分钟，最后发来一个“好”。",
+        "我回复了好的，心里还开着一个问号。",
+        "工作邮箱里唯一准时的，是容量快满的提醒。",
+        "邮件主题写着请查收，附件用自己的方式选择了缺席。",
+        "群里喊一声谁有原文件，整个办公室开始考古。",
+        "我刚把聊天窗口最小化，它就用红点把自己叫了回来。",
+        "消息里一句“有空看看”，实际附带了一只隐形秒表。",
+        "邮件抄送了十二个人，回复只有一个自动签名。",
+        "咖啡刚泡好，会议就开始了，最后我喝的是常温日程表。",
+        "午饭是一天中唯一一项我愿意提前完成的任务。",
+        "午休结束得很准时，午休开始这件事比较随缘。",
+        "下午三点的我，靠一块饼干保持线上状态。",
+        "工位上的水杯一天动得最少，却总比我先见底。",
+        "休息一下的计划，被我放进了“以后优化”。",
+        "办公室空调和需求一样，有人觉得太冷，有人要求再降。",
+        "今天的能量只够选一个按钮，我选了保存。",
+        "键盘比我更清楚加班时间，毕竟每一下都是它记的。",
+        "打印机卡纸的时候，看起来比我更擅长拒绝临时任务。",
+        "电脑提醒存储不足，我想说我也是。",
+        "文件进度条到了百分之九十九，决定留点悬念。",
+        "桌面快捷方式很多，真正快捷的只有关机。",
+        "软件问我是否恢复上次会话，我想恢复上次周末。",
+        "网盘同步了所有文件，唯独没同步我的下班意愿。",
+        "自动保存最贴心的一点，是它从不问我怎么还没做完。",
+        "键盘上最忙的三个键是保存、撤销和再保存。",
+        "电脑重启用了两分钟，我把它算进了今天的休息时间。",
+        "登录验证码过期很快，临时需求却能活到下周。",
+        "系统提示请稍候，终于有个界面懂我的处境。",
+        "周一先接上周的进度，接着就接到了下周的安排。",
+        "周二的好消息是已经上了两天班，坏消息也是。",
+        "周三像行程中转站，回头和往前都不算近。",
+        "周四的工作动力，全靠日历右边那一格。",
+        "周五下午说下周再议，是我最熟练的时间管理。",
+        "放假倒计时按天算，节前任务按小时来。",
+        "下班铃声是我的专注模式开关，响了以后专注离开。",
+        "我今天最大的成就，是下班前把充电器带走了。",
+        "周末计划原本排得很满，第一项睡醒就延迟了。",
+        "工作总结写持续推进，实际进度是持续被推进。",
+        "昨天的我给今天留了个简单任务，今天的我拒绝评论。",
+        "今年的职业目标很明确，先弄清下次会议在哪间屋。",
+        "老板说可以自由发挥，我自由地选了他提过的颜色。",
+        "同事说同步一下，我同步了心情，没同步到答案。",
+        "审批流程一共有三步，第一步叫等人上线。",
+        "今天的工作闭环很完整，从催我开始，到我催别人结束。",
+        "我在工作记录上写了处理完毕，文件在群里收到了新版本。",
+        "真正的高效，是两个人终于在同一份文件上提意见。",
+        "需求归档时有十个版本，最后归档的是一条聊天截图。",
+        "今天的结论已经很清楚，剩下的等明天再说清楚。",
     ]
 }
 
@@ -1077,7 +1098,7 @@ enum LaunchLogin {
 
 final class DockPanel: NSPanel {
     static let mainSize = NSSize(width: 392, height: 620)
-    static let dockWidth: CGFloat = 56
+    static let dockWidth: CGFloat = 28
     static let edgeMargin: CGFloat = 0
     static let magneticDistance: CGFloat = 36
 
@@ -1086,35 +1107,55 @@ final class DockPanel: NSPanel {
     var isDockDragging = false
     var isMainDragging = false
     private var autoDockTimer: Timer?
-    private var lastPointerPresence = Date()
-    private var keyboardMonitor: Any?
+    private var lastActivity = Date()
+    private var otherAppActivitySince: Date?
+    private var frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    private var localActivityMonitor: Any?
+    private var globalActivityMonitor: Any?
 
-    static func shouldAutoDock(now: Date, lastPresence: Date, pointerInside: Bool, interacting: Bool) -> Bool {
-        !pointerInside && !interacting && now.timeIntervalSince(lastPresence) >= 5
+    private func recordPanelActivity() {
+        lastActivity = Date()
+        otherAppActivitySince = nil
+        frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
+    static func shouldAutoDock(now: Date, lastActivity: Date, otherAppSince: Date?, interacting: Bool) -> Bool {
+        guard !interacting else { return false }
+        if let otherAppSince = otherAppSince {
+            return now.timeIntervalSince(otherAppSince) >= 3
+        }
+        return now.timeIntervalSince(lastActivity) >= 5
     }
 
     private func checkAutoDock() {
+        guard isVisible, !store.settings.docked else { return }
         let now = Date()
-        guard isVisible, !store.settings.docked else { lastPointerPresence = now; return }
-        let point = NSEvent.mouseLocation
-        let helperVisible = typographyPanel?.isVisible == true
-        let pointerInside = frame.contains(point)
+        let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        if currentPID != frontmostPID {
+            frontmostPID = currentPID
+            if currentPID == ProcessInfo.processInfo.processIdentifier {
+                recordPanelActivity()
+            } else if otherAppActivitySince == nil {
+                otherAppActivitySince = now
+            }
+        }
         let busy = isMainDragging || isDockDragging || store.draggedTaskID != nil
-            || NSEvent.pressedMouseButtons != 0 || attachedSheet != nil
-            || helperVisible || NSApp.windows.contains { $0 !== self && $0.isVisible && $0.level == .popUpMenu }
-        if pointerInside || busy { lastPointerPresence = now; return }
-        if Self.shouldAutoDock(now: now, lastPresence: lastPointerPresence, pointerInside: pointerInside, interacting: busy),
+            || attachedSheet != nil || NSApp.windows.contains { $0 !== self && $0.isVisible && $0.level == .popUpMenu }
+        if busy { recordPanelActivity(); return }
+        if Self.shouldAutoDock(now: now, lastActivity: lastActivity, otherAppSince: otherAppActivitySince, interacting: busy),
            let screen = currentScreen {
             let vf = screen.visibleFrame
             // Dock to the nearest edge, keeping the handle beside the current window.
             store.settings.dockY = max(vf.minY, min(vf.maxY - dockHeight, frame.midY - dockHeight / 2))
             dock(edge: frame.midX < vf.midX ? 0 : 1)
+            store.expandedTaskID = nil
         }
     }
 
     deinit {
         autoDockTimer?.invalidate()
-        if let monitor = keyboardMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = localActivityMonitor { NSEvent.removeMonitor(monitor) }
+        if let monitor = globalActivityMonitor { NSEvent.removeMonitor(monitor) }
     }
 
     /// 隐蔽的固定高度边缘抓手
@@ -1143,9 +1184,19 @@ final class DockPanel: NSPanel {
         store.panel = self
         autoDockTimer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.checkAutoDock() }
         if let timer = autoDockTimer { RunLoop.main.add(timer, forMode: .common) }
-        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            self?.lastPointerPresence = Date()
+        let activityEvents: NSEvent.EventTypeMask = [
+            .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+            .otherMouseDown, .otherMouseUp, .leftMouseDragged, .rightMouseDragged,
+            .otherMouseDragged, .scrollWheel, .keyDown, .gesture, .magnify, .rotate, .swipe
+        ]
+        localActivityMonitor = NSEvent.addLocalMonitorForEvents(matching: activityEvents) { [weak self] event in
+            self?.recordPanelActivity()
             return event
+        }
+        globalActivityMonitor = NSEvent.addGlobalMonitorForEvents(matching: activityEvents) { [weak self] _ in
+            guard let self = self, self.isVisible, !self.store.settings.docked,
+                  self.otherAppActivitySince == nil else { return }
+            self.otherAppActivitySince = Date()
         }
         if s.docked { applyDockedFrame(animated: false) }
         else { applyMainFrame(animated: false) }
@@ -1169,7 +1220,7 @@ final class DockPanel: NSPanel {
     }
 
     func finishMainDrag() {
-        lastPointerPresence = Date()
+        recordPanelActivity()
         isMainDragging = false
         guard !store.settings.docked, let screen = currentScreen else { return }
         if let edge = Self.edgeForRelease(frame: frame, visible: screen.visibleFrame) {
@@ -1233,7 +1284,7 @@ final class DockPanel: NSPanel {
 
     /// 从侧边栏展开主界面（换一条语录）
     func undock(filter: Priority? = nil) {
-        lastPointerPresence = Date()
+        recordPanelActivity()
         store.nextQuote()
         store.openWithFilter(filter)
         store.settings.docked = false
@@ -1243,7 +1294,7 @@ final class DockPanel: NSPanel {
 
     /// 从停靠态拖拽直接展开整个界面（窗口出现在当前拖拽位置）
     func undockToDragPosition() {
-        lastPointerPresence = Date()
+        recordPanelActivity()
         let origin = frame.origin
         store.nextQuote()
         store.clearFilter()
@@ -1396,19 +1447,19 @@ struct DockedStackView: View {
     var body: some View {
         VStack(spacing: 4) {
             ForEach(Priority.allCases) { priority in
-                HStack(spacing: 5) {
-                    Circle().fill(priority.color).frame(width: 6, height: 6)
+                HStack(spacing: 2) {
+                    Circle().fill(priority.color).frame(width: 4, height: 4)
                     Text("\(store.typeCounts[priority] ?? 0)")
-                        .font(.system(size: 11, weight: .semibold, design: .rounded)).monospacedDigit()
+                        .font(.system(size: 10, weight: .semibold, design: .rounded)).monospacedDigit()
                         .foregroundColor((store.typeCounts[priority] ?? 0) == 0 ? .secondary : .primary)
                 }
                 .frame(maxWidth: .infinity).frame(height: 20)
                 .background(Color.primary.opacity(0.035), in: Capsule())
             }
         }
-        .padding(6).frame(width: DockPanel.dockWidth, height: 104)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.96), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.primary.opacity(0.08)))
+        .padding(.horizontal, 2).frame(width: DockPanel.dockWidth, height: 104)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.96), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
         .contentShape(Rectangle())
         .help("双击展开任务 · 拖离边缘展开")
         .accessibilityLabel("侧边任务数量，双击展开")
@@ -1865,8 +1916,7 @@ struct MainView: View {
                     .disabled(store.workQuotes.favorites.contains(store.quote) || store.quoteLibraryReadOnly)
                 Button("不喜欢，删除", role: .destructive) { store.dislikeQuote() }.disabled(store.quoteLibraryReadOnly)
                 Divider()
-                Text(store.onlineQuoteStatus)
-                Button("重新联网筛选") { store.fetchOnlineQuotesIfNeeded(force: true) }
+                Text("本地语录库存 \(QuoteService.quotes.count) 句")
                 Button("换一句") { store.nextQuote() }
                 Button("喜欢的语录（\(store.workQuotes.favorites.count)）") { showFavorites = true }
             } label: {
