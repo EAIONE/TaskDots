@@ -41,7 +41,7 @@ struct TaskItem: Codable, Identifiable {
     var revisionCountValue: Int? = nil
     var lastSubmittedAt: Date? = nil
     var revisionCount: Int { revisionCountValue ?? 0 }
-    func showsSubmissionBorder(at date: Date) -> Bool {
+    func isRecentlySubmitted(at date: Date) -> Bool {
         guard let submitted = lastSubmittedAt else { return false }
         return date < submitted.addingTimeInterval(4 * 60 * 60)
     }
@@ -341,7 +341,11 @@ final class Store: ObservableObject {
     func moveTaskToY(id: UUID, y: CGFloat) {
         let order = allActive
         guard let from = order.firstIndex(where: { $0.id == id }) else { return }
-        let candidates = order.filter { $0.id != id && taskFrames[$0.id] != nil }
+        let now = Date()
+        let submitted = order[from].isRecentlySubmitted(at: now)
+        let candidates = order.filter {
+            $0.id != id && taskFrames[$0.id] != nil && $0.isRecentlySubmitted(at: now) == submitted
+        }
         guard let nearest = candidates.min(by: { abs(taskFrames[$0.id]!.midY - y) < abs(taskFrames[$1.id]!.midY - y) }),
               let to = order.firstIndex(where: { $0.id == nearest.id }) else { return }
         shiftTask(id: id, by: to - from)
@@ -371,6 +375,12 @@ final class Store: ObservableObject {
         return true
     }
     var activeTasks: [TaskItem] { allActive.filter(matches) }
+
+    func displayedTasks(at date: Date) -> [TaskItem] {
+        let visible = activeTasks
+        return visible.filter { !$0.isRecentlySubmitted(at: date) }
+            + visible.filter { $0.isRecentlySubmitted(at: date) }
+    }
     var completedTasks: [TaskItem] {
         tasks.filter { $0.isDone && matches($0) }.sorted { ($0.completedAt ?? Date()) > ($1.completedAt ?? Date()) }
     }
@@ -1918,25 +1928,29 @@ struct MainView: View {
 
     private var taskList: some View {
         ScrollView {
-            LazyVStack(spacing: 4) {
-                if store.activeTasks.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: store.hasFilter ? "magnifyingglass" : "checkmark.seal")
-                            .font(.system(size: 30, weight: .light)).foregroundColor(.accentColor.opacity(0.55))
-                        Text(store.hasFilter ? "没有找到相关任务" : "暂时没有待办")
-                            .font(.system(size: 14, weight: .medium))
-                        Text(store.hasFilter ? "试试其他关键词，或重置筛选" : "在上方写下第一件要做的事")
-                            .font(.system(size: 11)).foregroundColor(.secondary)
-                    }.frame(maxWidth: .infinity).padding(.vertical, 36)
-                } else {
-                    ForEach(store.activeTasks) { task in
-                        TaskRow(store: store, task: task)
-                            .background(GeometryReader { geometry in
-                                Color.clear.preference(key: TaskFramePreference.self, value: [task.id: geometry.frame(in: .named("taskList"))])
-                            })
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                let now = Date()
+                let tasks = store.displayedTasks(at: now)
+                LazyVStack(spacing: 4) {
+                    if tasks.isEmpty {
+                        VStack(spacing: 10) {
+                            Image(systemName: store.hasFilter ? "magnifyingglass" : "checkmark.seal")
+                                .font(.system(size: 30, weight: .light)).foregroundColor(.accentColor.opacity(0.55))
+                            Text(store.hasFilter ? "没有找到相关任务" : "暂时没有待办")
+                                .font(.system(size: 14, weight: .medium))
+                            Text(store.hasFilter ? "试试其他关键词，或重置筛选" : "在上方写下第一件要做的事")
+                                .font(.system(size: 11)).foregroundColor(.secondary)
+                        }.frame(maxWidth: .infinity).padding(.vertical, 36)
+                    } else {
+                        ForEach(tasks) { task in
+                            TaskRow(store: store, task: task, recentlySubmitted: task.isRecentlySubmitted(at: now))
+                                .background(GeometryReader { geometry in
+                                    Color.clear.preference(key: TaskFramePreference.self, value: [task.id: geometry.frame(in: .named("taskList"))])
+                                })
+                        }
                     }
-                }
-            }.padding(.horizontal, 12).padding(.bottom, 8)
+                }.padding(.horizontal, 12).padding(.bottom, 8)
+            }
         }
         .coordinateSpace(name: "taskList")
         .onHover { inside in
@@ -1960,6 +1974,7 @@ struct TaskRow: View {
     @ObservedObject var store: Store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let task: TaskItem
+    let recentlySubmitted: Bool
     private var expanded: Bool { store.expandedTaskID == task.id }
     @State private var draftName = ""
     @State private var draftNotes = ""
@@ -2026,8 +2041,16 @@ struct TaskRow: View {
                             .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(task.priority.color.opacity(0.32)))
                             .contentShape(RoundedRectangle(cornerRadius: 7))
                         }.buttonStyle(.plain).disabled(store.isReadOnly)
-                            .help("点击记录一次提交，返修次数加 1，绿色边框保留 4 小时")
+                            .help("点击记录一次提交，返修次数加 1，已提交状态保留 4 小时")
                             .accessibilityLabel("返修次数 \(task.revisionCount)，点击加一次")
+                        if recentlySubmitted {
+                            Label("已提交", systemImage: "checkmark")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.accentColor)
+                                .padding(.horizontal, 5).padding(.vertical, 3)
+                                .background(Color.accentColor.opacity(0.09), in: Capsule())
+                                .fixedSize()
+                        }
                         if let date = task.dueDate {
                             Text(dueBadgeText(date)).font(.system(size: 10, weight: .medium))
                                 .foregroundColor(urgent ? .red : Color.primary.opacity(0.7))
@@ -2063,17 +2086,6 @@ struct TaskRow: View {
                         })
 
             }.padding(.horizontal, 10).padding(.vertical, 7)
-            .overlay {
-            TimelineView(.periodic(from: .now, by: 1)) { _ in
-                if task.showsSubmissionBorder(at: Date()) {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .strokeBorder(Color(red: 0.46, green: 0.73, blue: 0.08),
-                                      style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [3, 3]))
-                        .padding(.leading, 38)
-                        .padding(.trailing, 2).padding(.vertical, 2)
-                }
-            }.allowsHitTesting(false)
-            }
 
             if expanded {
                 Divider().padding(.horizontal, 12)
