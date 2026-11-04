@@ -1109,7 +1109,7 @@ enum LaunchLogin {
 final class DockPanel: NSPanel {
     static let mainSize = NSSize(width: 392, height: 620)
     static let dockWidth: CGFloat = 28
-    static let dockHeight: CGFloat = 128
+    static let dockHeight: CGFloat = 112
     static let edgeMargin: CGFloat = 0
     static let magneticDistance: CGFloat = 36
 
@@ -1437,7 +1437,7 @@ struct DockedStackView: View {
             let submitted = active.filter { $0.isRecentlySubmitted(at: now) }.count
             let pending = active.filter { !$0.isRecentlySubmitted(at: now) }
             let counts = Dictionary(grouping: pending, by: \.priority).mapValues(\.count)
-            VStack(spacing: 4) {
+            VStack(spacing: 2) {
                 ForEach(Priority.allCases) { priority in
                     countPill(color: priority.color, count: counts[priority] ?? 0)
                 }
@@ -1461,7 +1461,7 @@ struct DockedStackView: View {
                 .font(.system(size: 10, weight: .semibold, design: .rounded)).monospacedDigit()
                 .foregroundColor(count == 0 ? .secondary : .primary)
         }
-        .frame(maxWidth: .infinity).frame(height: 20)
+        .frame(maxWidth: .infinity).frame(height: 19)
         .background(Color.primary.opacity(0.035), in: Capsule())
     }
 
