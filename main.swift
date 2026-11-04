@@ -68,21 +68,23 @@ struct RecurRule: Codable, Identifiable {
 }
 
 struct AppSettings: Codable {
-    var docked: Bool = false
+    var docked: Bool = true
     var edge: Int = 1                 // 0=左边缘 1=右边缘
     var dockY: CGFloat = 420
+    var dockOpacity: Double = 1
     var launchAtLogin: Bool = false
     var sortMode: String = "manual"
     var reminderHour: Int = 10
     var collapsed: Bool = false       // 兼容旧数据，已不再使用
 
-    enum CodingKeys: String, CodingKey { case docked, edge, dockY, launchAtLogin, collapsed, sortMode, reminderHour }
+    enum CodingKeys: String, CodingKey { case docked, edge, dockY, dockOpacity, launchAtLogin, collapsed, sortMode, reminderHour }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        docked = try c.decodeIfPresent(Bool.self, forKey: .docked) ?? false
+        docked = try c.decodeIfPresent(Bool.self, forKey: .docked) ?? true
         edge = try c.decodeIfPresent(Int.self, forKey: .edge) ?? 1
         dockY = try c.decodeIfPresent(CGFloat.self, forKey: .dockY) ?? 420
+        dockOpacity = min(1, max(0.2, try c.decodeIfPresent(Double.self, forKey: .dockOpacity) ?? 1))
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
         sortMode = try c.decodeIfPresent(String.self, forKey: .sortMode) ?? "manual"
         reminderHour = min(16, max(10, try c.decodeIfPresent(Int.self, forKey: .reminderHour) ?? 10))
@@ -1430,7 +1432,7 @@ struct DockedStackView: View {
         VStack(spacing: 4) {
             ForEach(Priority.allCases) { priority in
                 HStack(spacing: 2) {
-                    Circle().fill(priority.color).frame(width: 4, height: 4)
+                    Circle().fill(priority.color).frame(width: 8, height: 8)
                     Text("\(store.typeCounts[priority] ?? 0)")
                         .font(.system(size: 10, weight: .semibold, design: .rounded)).monospacedDigit()
                         .foregroundColor((store.typeCounts[priority] ?? 0) == 0 ? .secondary : .primary)
@@ -1440,7 +1442,7 @@ struct DockedStackView: View {
             }
         }
         .padding(.horizontal, 2).frame(width: DockPanel.dockWidth, height: 104)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.96), in: RoundedRectangle(cornerRadius: 8))
+        .background(Color(nsColor: .windowBackgroundColor).opacity(store.settings.dockOpacity), in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
         .contentShape(Rectangle())
         .help("双击展开任务 · 拖离边缘展开")
@@ -1467,6 +1469,7 @@ struct FilterBar: View {
     @State private var showPriorityFilter = false
     @Binding var query: String
     @Binding var priorities: Set<Priority>
+    var compact = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -1479,8 +1482,8 @@ struct FilterBar: View {
                         .buttonStyle(.plain).foregroundColor(.secondary).help("清除搜索")
                 }
             }
-            .font(.system(size: 12))
-            .padding(9)
+            .font(.system(size: compact ? 11 : 12))
+            .padding(compact ? 5 : 9)
             .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 9))
             Button { showPriorityFilter.toggle() } label: {
                 HStack(spacing: 5) {
@@ -1525,7 +1528,7 @@ struct FilterBar: View {
             }
 
         }
-        .padding(.horizontal, 16).padding(.vertical, 8)
+        .padding(.horizontal, compact ? 0 : 16).padding(.vertical, compact ? 0 : 8)
     }
 }
 
@@ -1828,16 +1831,16 @@ struct MainView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            FilterBar(query: $store.searchText, priorities: $store.filterPriorities)
             AddSection(store: store)
                 .disabled(store.isReadOnly)
                 .padding(.horizontal, 12).padding(.bottom, 12)
-            HStack {
+            HStack(spacing: 7) {
                 Text(store.hasFilter ? "筛选结果 · \(store.activeTasks.count)" : "待办 · \(store.activeCount)")
                     .font(.system(size: 11, weight: .semibold)).foregroundColor(.secondary)
-                Spacer()
+                    .fixedSize()
+                FilterBar(query: $store.searchText, priorities: $store.filterPriorities, compact: true)
                 if store.hasFilter {
-                    Button("重置筛选") { store.clearFilter() }.buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.accentColor)
+                    Button("重置") { store.clearFilter() }.buttonStyle(.plain).font(.system(size: 11)).foregroundColor(.accentColor).fixedSize().help("重置筛选")
                 } else {
                     Menu {
                         Button("手动排序") { store.settings.sortMode = "manual" }
@@ -2361,6 +2364,15 @@ struct SettingsSheet: View {
             Divider().opacity(0.5)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    GroupBox("侧边栏") {
+                        HStack {
+                            Text("背景不透明度")
+                            Slider(value: $store.settings.dockOpacity, in: 0.2...1, step: 0.05)
+                                .accessibilityLabel("侧边栏背景不透明度")
+                            Text(store.settings.dockOpacity, format: .percent.precision(.fractionLength(0)))
+                                .monospacedDigit().frame(width: 38, alignment: .trailing)
+                        }.font(.system(size: 11))
+                    }
                     GroupBox {
                         Toggle("开机自动启动", isOn: Binding(
                             get: { store.settings.launchAtLogin },
