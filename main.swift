@@ -72,12 +72,13 @@ struct AppSettings: Codable {
     var edge: Int = 1                 // 0=左边缘 1=右边缘
     var dockY: CGFloat = 420
     var dockOpacity: Double = 1
+    var autoDockSeconds = 3
     var launchAtLogin: Bool = false
     var sortMode: String = "manual"
     var reminderHour: Int = 10
     var collapsed: Bool = false       // 兼容旧数据，已不再使用
 
-    enum CodingKeys: String, CodingKey { case docked, edge, dockY, dockOpacity, launchAtLogin, collapsed, sortMode, reminderHour }
+    enum CodingKeys: String, CodingKey { case docked, edge, dockY, dockOpacity, autoDockSeconds, launchAtLogin, collapsed, sortMode, reminderHour }
     init() {}
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -85,6 +86,7 @@ struct AppSettings: Codable {
         edge = try c.decodeIfPresent(Int.self, forKey: .edge) ?? 1
         dockY = try c.decodeIfPresent(CGFloat.self, forKey: .dockY) ?? 420
         dockOpacity = min(1, max(0.2, try c.decodeIfPresent(Double.self, forKey: .dockOpacity) ?? 1))
+        autoDockSeconds = max(1, try c.decodeIfPresent(Int.self, forKey: .autoDockSeconds) ?? 3)
         launchAtLogin = try c.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
         sortMode = try c.decodeIfPresent(String.self, forKey: .sortMode) ?? "manual"
         reminderHour = min(16, max(10, try c.decodeIfPresent(Int.self, forKey: .reminderHour) ?? 10))
@@ -1107,6 +1109,7 @@ enum LaunchLogin {
 final class DockPanel: NSPanel {
     static let mainSize = NSSize(width: 392, height: 620)
     static let dockWidth: CGFloat = 28
+    static let dockHeight: CGFloat = 128
     static let edgeMargin: CGFloat = 0
     static let magneticDistance: CGFloat = 36
 
@@ -1127,12 +1130,8 @@ final class DockPanel: NSPanel {
         frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
     }
 
-    static func shouldAutoDock(now: Date, lastActivity: Date, otherAppSince: Date?, interacting: Bool) -> Bool {
-        guard !interacting else { return false }
-        if let otherAppSince = otherAppSince {
-            return now.timeIntervalSince(otherAppSince) >= 3
-        }
-        return now.timeIntervalSince(lastActivity) >= 3
+    static func shouldAutoDock(now: Date, lastActivity: Date, otherAppSince: Date?, interacting: Bool, delay: TimeInterval = 3) -> Bool {
+        !interacting && now.timeIntervalSince(otherAppSince ?? lastActivity) >= delay
     }
 
     private func checkAutoDock() {
@@ -1150,7 +1149,8 @@ final class DockPanel: NSPanel {
         let busy = isMainDragging || isDockDragging || store.draggedTaskID != nil
             || attachedSheet != nil || NSApp.windows.contains { $0 !== self && $0.isVisible && $0.level == .popUpMenu }
         if busy { recordPanelActivity(); return }
-        if Self.shouldAutoDock(now: now, lastActivity: lastActivity, otherAppSince: otherAppActivitySince, interacting: busy),
+        if Self.shouldAutoDock(now: now, lastActivity: lastActivity, otherAppSince: otherAppActivitySince, interacting: busy,
+                               delay: TimeInterval(store.settings.autoDockSeconds)),
            let screen = currentScreen {
             let vf = screen.visibleFrame
             // Dock to the nearest edge, keeping the handle beside the current window.
@@ -1167,7 +1167,7 @@ final class DockPanel: NSPanel {
     }
 
     /// 隐蔽的固定高度边缘抓手
-    var dockHeight: CGFloat { 104 }
+    var dockHeight: CGFloat { Self.dockHeight }
 
     init(store: Store) {
         self.store = store
@@ -1430,34 +1430,39 @@ struct RootView: View {
 struct DockedStackView: View {
     @ObservedObject var store: Store
 
-    private var pillData: [(Priority, Int)] {
-        let counts = store.typeCounts
-        return Priority.allCases.compactMap { p in
-            guard let c = counts[p], c > 0 else { return nil }
-            return (p, c)
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let now = Date()
+            let active = store.allActive
+            let submitted = active.filter { $0.isRecentlySubmitted(at: now) }.count
+            let pending = active.filter { !$0.isRecentlySubmitted(at: now) }
+            let counts = Dictionary(grouping: pending, by: \.priority).mapValues(\.count)
+            VStack(spacing: 4) {
+                ForEach(Priority.allCases) { priority in
+                    countPill(color: priority.color, count: counts[priority] ?? 0)
+                }
+                countPill(color: .accentColor, count: submitted)
+            }
+            .padding(.horizontal, 2)
+            .frame(width: DockPanel.dockWidth, height: DockPanel.dockHeight)
+            .background(Color(nsColor: .windowBackgroundColor).opacity(store.settings.dockOpacity), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
+            .contentShape(Rectangle())
+            .help("蓝色为已提交 · 双击展开任务 · 拖离边缘展开")
+            .accessibilityLabel("侧边任务数量，已提交 \(submitted) 项，双击展开")
+            .overlay(WindowDragHandle().frame(maxWidth: .infinity, maxHeight: .infinity))
         }
     }
 
-    var body: some View {
-        VStack(spacing: 4) {
-            ForEach(Priority.allCases) { priority in
-                HStack(spacing: 2) {
-                    Circle().fill(priority.color).frame(width: 8, height: 8)
-                    Text("\(store.typeCounts[priority] ?? 0)")
-                        .font(.system(size: 10, weight: .semibold, design: .rounded)).monospacedDigit()
-                        .foregroundColor((store.typeCounts[priority] ?? 0) == 0 ? .secondary : .primary)
-                }
-                .frame(maxWidth: .infinity).frame(height: 20)
-                .background(Color.primary.opacity(0.035), in: Capsule())
-            }
+    private func countPill(color: Color, count: Int) -> some View {
+        HStack(spacing: 2) {
+            Circle().fill(color).frame(width: 8, height: 8)
+            Text("\(count)")
+                .font(.system(size: 10, weight: .semibold, design: .rounded)).monospacedDigit()
+                .foregroundColor(count == 0 ? .secondary : .primary)
         }
-        .padding(.horizontal, 2).frame(width: DockPanel.dockWidth, height: 104)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(store.settings.dockOpacity), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color.primary.opacity(0.08)))
-        .contentShape(Rectangle())
-        .help("双击展开任务 · 拖离边缘展开")
-        .accessibilityLabel("侧边任务数量，双击展开")
-        .overlay(WindowDragHandle().frame(maxWidth: .infinity, maxHeight: .infinity))
+        .frame(maxWidth: .infinity).frame(height: 20)
+        .background(Color.primary.opacity(0.035), in: Capsule())
     }
 
 }
@@ -2125,7 +2130,14 @@ struct TaskRow: View {
                 }.padding(.horizontal, 14).padding(.vertical, 9)
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background {
+            Color(nsColor: .controlBackgroundColor)
+                .overlay {
+                    if recentlySubmitted {
+                        Color.accentColor.opacity(0.17)
+                    }
+                }
+        }
         .overlay(alignment: .leading) { task.priority.color.frame(width: 4) }
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay {
@@ -2394,14 +2406,30 @@ struct SettingsSheet: View {
             Divider().opacity(0.5)
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    GroupBox("侧边栏") {
-                        HStack {
-                            Text("背景不透明度")
-                            Slider(value: $store.settings.dockOpacity, in: 0.2...1, step: 0.05)
-                                .accessibilityLabel("侧边栏背景不透明度")
-                            Text(store.settings.dockOpacity, format: .percent.precision(.fractionLength(0)))
-                                .monospacedDigit().frame(width: 38, alignment: .trailing)
-                        }.font(.system(size: 11))
+                    Group {
+                        GroupBox("侧边栏") {
+                            HStack {
+                                Text("背景不透明度")
+                                Slider(value: $store.settings.dockOpacity, in: 0.2...1, step: 0.05)
+                                    .accessibilityLabel("侧边栏背景不透明度")
+                                Text(store.settings.dockOpacity, format: .percent.precision(.fractionLength(0)))
+                                    .monospacedDigit().frame(width: 38, alignment: .trailing)
+                            }.font(.system(size: 11))
+                        }
+                        GroupBox("自动收纳") {
+                            HStack {
+                                Text("等待时间")
+                                Spacer()
+                                TextField("秒数", value: Binding(
+                                    get: { store.settings.autoDockSeconds },
+                                    set: { store.settings.autoDockSeconds = max(1, $0) }
+                                ), format: .number.grouping(.never))
+                                .frame(width: 62)
+                                .multilineTextAlignment(.trailing)
+                                .accessibilityLabel("自动收纳秒数")
+                                Text("秒").foregroundColor(.secondary)
+                            }.font(.system(size: 11))
+                        }
                     }
                     GroupBox {
                         Toggle("开机自动启动", isOn: Binding(
